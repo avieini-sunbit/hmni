@@ -137,6 +137,7 @@ class Matcher:
         # Batch size for predictions
         self.batch_size = 64 if self.device.type == 'cpu' else 512
 
+
         # seen names (mapping dict from raw name to processed name)
         self.seen_names = {}
         # seen pairs (mapping dict from name pair tuple to similarity)
