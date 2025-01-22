@@ -1,0 +1,102 @@
+Metadata-Version: 2.1
+Name: hmni
+Version: 0.1.9
+Summary: Fuzzy Name Matching with Machine Learning
+Home-page: https://github.com/Christopher-Thornton/hmni
+Author: Christopher Thornton
+Author-email: christopher_thornton@outlook.com
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Programming Language :: Python :: 3.9
+Classifier: Programming Language :: Python :: 3.10
+Classifier: Programming Language :: Python :: 3.11
+Classifier: Programming Language :: Python :: 3.12
+Requires-Python: >=3.9
+Description-Content-Type: text/markdown
+License-File: LICENSE
+Requires-Dist: numpy
+Requires-Dist: pandas
+Requires-Dist: torch
+Requires-Dist: joblib
+Requires-Dist: unidecode
+Requires-Dist: fuzzywuzzy
+Requires-Dist: editdistance
+Requires-Dist: abydos@ git+https://github.com/IlnarSelimcan/abydos
+
+# HMNI
+
+Fuzzy name matching with machine learning. Perform common fuzzy name matching tasks including similarity scoring, record linkage, deduplication and normalization.
+
+HMNI is trained on an internationally-transliterated Latin firstname dataset, where precision is afforded priority.
+
+| Model      | Accuracy | Precision | Recall | F1-Score |
+| ---------- | -------- | --------- | ------ | -------- |
+| HMNI-Latin | 0.9393   | 0.9255    | 0.7548 | 0.8315   |
+
+## Installation
+
+```bash
+pip install hmni
+```
+
+## Quick Usage Guide
+
+### Initialize a Matcher Object
+```python
+import hmni
+matcher = hmni.Matcher(model='latin')
+```
+
+### Single Pair Similarity
+```python
+matcher.similarity('Alan', 'Al')
+# 0.6838303319889133
+
+matcher.similarity('Alan', 'Al', prob=False)
+# 1
+
+matcher.similarity('Alan Turing', 'Al Turing', surname_first=False)
+# 0.6838303319889133
+```
+
+### Record Linkage
+```python
+import pandas as pd
+
+df1 = pd.DataFrame({'name': ['Al', 'Mark', 'James', 'Harold']})
+df2 = pd.DataFrame({'name': ['Mark', 'Alan', 'James', 'Harold']})
+
+merged = matcher.fuzzymerge(df1, df2, how='left', on='name')
+```
+
+### Name Deduplication and Normalization
+```python
+names_list = ['Alan', 'Al', 'Al', 'James']
+
+matcher.dedupe(names_list, keep='longest')
+# ['Alan', 'James']
+
+matcher.dedupe(names_list, keep='frequent')
+# ['Al', 'James']
+
+matcher.dedupe(names_list, keep='longest', replace=True)
+# ['Alan', 'Alan', 'Alan', 'James']
+```
+
+## Requirements
+
+- Python >=3.9
+- numpy
+- pandas
+- torch
+- joblib
+- unidecode
+- fuzzywuzzy
+- editdistance
+- abydos
+
+## License
+
+MIT 

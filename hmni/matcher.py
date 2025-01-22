@@ -11,18 +11,24 @@ import joblib
 import unidecode
 import numpy as np
 import pandas as pd
+import torch
 from random import randint
+import editdistance
 
 import warnings
+warnings.filterwarnings("ignore", category=UserWarning)
 
-with warnings.catch_warnings():
-    warnings.filterwarnings("ignore", category=UserWarning)
-    from fuzzywuzzy import fuzz
+
+from fuzzywuzzy import fuzz
+
+
+
 
 from collections import Counter
 from hmni import syllable_tokenizer
-from hmni import input_helpers
-from hmni import preprocess
+from hmni import input_helpers_torch as input_helpers
+from hmni import preprocess_torch as preprocess    
+from hmni.siamese_network_torch import SiameseLSTM
 import tarfile
 
 from abydos.phones import *
@@ -32,10 +38,6 @@ from abydos.distance import (IterativeSubString, BISIM, DiscountedLevenshtein, P
                              PhoneticEditDistance)
 
 import logging
-
-logging.getLogger('tensorflow').setLevel(logging.FATAL)
-os.environ['TF_CPP_MIN_LOG_LEVEL'] = '2'
-import tensorflow as tf
 
 import sys
 
@@ -91,46 +93,49 @@ class Matcher:
         # Soundex Lastname Algorithm
         self.pshp_soundex_last = PSHPSoundexLast()
 
+        # Update feature names to match latest implementation
+        self.feature_names = [
+            'partial_ratio', 'token_sort', 'tkn_set', 'ipa_sim',
+            'soundex_match', 'iterativesubstring', 'bisim',
+            'discountedlevenshtein', 'prefix', 'lcsstr', 'mlipns',
+            'strcmp95', 'mra', 'editex', 'saps', 'flexmetric',
+            'jaro', 'higueramico', 'sift4', 'eudex','aline', 'covington',
+            'phoneticeditdistance'
+        ]
+        
         # String Distance algorithms
         self.algos = [IterativeSubString(), BISIM(), DiscountedLevenshtein(), Prefix(), LCSstr(), MLIPNS(),
                       Strcmp95(), MRA(), Editex(), SAPS(), FlexMetric(), JaroWinkler(mode='Jaro'), HigueraMico(),
-                      Sift4(), Eudex(), ALINE(), CovingtonGuard(), PhoneticEditDistance()]
-        self.algo_names = ['iterativesubstring', 'bisim', 'discountedlevenshtein', 'prefix', 'lcsstr', 'mlipns',
-                           'strcmp95', 'mra', 'editex', 'saps', 'flexmetric', 'jaro', 'higueramico',
-                           'sift4', 'eudex', 'aline', 'covington', 'phoneticeditdistance']
-
-        # String Distance Pipeline (Level 0/Base Model)
-        self.baseModel = joblib.load(os.path.join(model_dir, 'base.pkl'))
-
-        # Character Embedding Network (Level 0/Base Model)
-        self.vocab = preprocess.VocabularyProcessor(max_document_length=15, min_frequency=0).restore(
-            os.path.join(model_dir, 'vocab'))
-
-        siamese_model = os.path.join(model_dir, 'siamese')
-
-        # start tensorflow session
-        graph = tf.Graph()
-        with graph.as_default() as graph:
-            self.sess = tf.Session() if tf.__version__[0] == '1' else tf.compat.v1.Session()
-            with self.sess.as_default():
-                # Load the saved meta graph and restore variables
-                if tf.__version__[0] == '1':
-                    saver = tf.train.import_meta_graph('{}.meta'.format(siamese_model))
-                    self.sess.run(tf.global_variables_initializer())
-                else:
-                    saver = tf.compat.v1.train.import_meta_graph('{}.meta'.format(siamese_model))
-                    self.sess.run(tf.compat.v1.global_variables_initializer())
-                saver.restore(self.sess, siamese_model)
-                # Get the placeholders from the graph by name
-            self.input_x1 = graph.get_operation_by_name('input_x1').outputs[0]
-            self.input_x2 = graph.get_operation_by_name('input_x2').outputs[0]
-
-            self.dropout_keep_prob = graph.get_operation_by_name('dropout_keep_prob').outputs[0]
-            self.prediction = graph.get_operation_by_name('output/distance').outputs[0]
-            self.sim = graph.get_operation_by_name('accuracy/temp_sim').outputs[0]
-
-        # Logreg (Level 1/Meta Model)
+                      Sift4(), Eudex(),ALINE(), CovingtonGuard(), PhoneticEditDistance()]
+        
+        # Load models
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        
+        # Base model (Random Forest)
+        self.baseModel = joblib.load(os.path.join(model_dir, 'base_model.pkl'))
+        
+        # Load vocabulary
+        self.vocab = preprocess.VocabularyProcessor.load(os.path.join(model_dir, 'vocab_siamese.pkl'))
+        
+        # Initialize and load Siamese model
+        self.siamese_model = SiameseLSTM(
+            vocab_size=len(self.vocab.vocabulary_),
+            embedding_size=300,
+            hidden_units=50,
+            n_layers=2,
+            dropout=0.2
+        ).to(self.device)
+        
+        # Load model with new checkpoint format
+        checkpoint = torch.load(os.path.join(model_dir, 'siamese_model_final.pt'), map_location=self.device,weights_only=True)
+        self.siamese_model.load_state_dict(checkpoint['model_state_dict'])
+        self.siamese_model.eval()
+        
+        # Meta model
         self.metaModel = joblib.load(os.path.join(model_dir, 'meta.pkl'))
+        
+        # Batch size for predictions
+        self.batch_size = 64 if self.device.type == 'cpu' else 512
 
         # seen names (mapping dict from raw name to processed name)
         self.seen_names = {}
@@ -144,14 +149,13 @@ class Matcher:
         model_dir = os.path.join(os.path.dirname(__file__), "models", self.model)
         if not os.path.exists(model_dir):
             tar = tarfile.open(os.path.join(os.path.dirname(__file__), "models", self.model + ".tar.gz"), "r:gz")
-            os.makedirs(model_dir)
-            tar.extractall(model_dir)
+            tar.extractall(os.path.join(os.path.dirname(__file__), "models"))
             tar.close()
         return model_dir
 
     def output_sim(self, sim, prob, threshold):
         if prob:
-            return sim
+            return round(sim,4)
         return 1 if sim >= threshold else 0
 
     def assign_similarity(self, name_a, name_b, score):
@@ -164,6 +168,7 @@ class Matcher:
         self.user_scores[hash(pair)] = score
 
     def similarity(self, name_a, name_b, prob=True, threshold=0.5, surname_first=False):
+        """Calculate similarity between two names"""
         # input validation
         if not (isinstance(name_a, str) and isinstance(name_b, str)):
             raise TypeError('Only string comparison is supported in similarity method')
@@ -261,9 +266,9 @@ class Matcher:
             return self.output_sim(seen, prob=prob, threshold=threshold)
 
         # generate features for base-level model
-        features = self.featurize(pair)
+        # features = self.featurize(pair)
         # make inference on meta model
-        sim = self.meta_inf(pair, features)
+        sim = self.meta_inf(pair[0],pair[1])
 
         if not missing_component:
             # add pair score to the seen dictionary
@@ -363,9 +368,9 @@ class Matcher:
         if seen is not None:
             return seen
         # chained processing steps
-        processed_name = re.sub('[^a-zA-Z\W]+', '', unidecode.unidecode(name).lower().strip()) \
+        processed_name = re.sub('[^a-zA-Z]+', '', unidecode.unidecode(name).lower().strip()) \
             .replace('\'s', '').replace('\'', '')
-        processed_name = [x for x in re.split('\W+', processed_name) if x != '']
+        processed_name = [x for x in re.split(r'\+', processed_name) if x != '']
         # add processed name to the seen dictionary
         self.seen_names[hash(name)] = processed_name
         return processed_name
@@ -379,7 +384,7 @@ class Matcher:
         syll_b = syllable_tokenizer.syllables(pair[1])
 
         # generate unique features
-        features = np.zeros(23)
+        features = np.zeros(23)  # 5 base features + 17 algorithm features
         features[0] = fuzz.partial_ratio(syll_a, syll_b)  # partial ratio
         features[1] = fuzz.token_sort_ratio(syll_a, syll_b)  # sort ratio
         features[2] = fuzz.token_set_ratio(syll_a, syll_b)  # set ratio
@@ -394,36 +399,82 @@ class Matcher:
     def transform_names(self, pair):
         x1 = np.asarray(list(self.vocab.transform(np.asarray([pair[0]]))))
         x2 = np.asarray(list(self.vocab.transform(np.asarray([pair[1]]))))
-        return x1, x2
+        return torch.from_numpy(x1).to(self.device), torch.from_numpy(x2).to(self.device)
 
-    def siamese_inf(self, df):
-        x1, x2 = self.transform_names(df)
-
-        # collect the predictions here
-        (prediction, sim) = self.sess.run([self.prediction, self.sim], {
-            self.input_x1: x1,
-            self.input_x2: x2,
-            self.dropout_keep_prob: 1.0,
-        })
-        sim = 1 - prediction[0]
+    def siamese_inf(self, pair):
+        x1, x2 = self.transform_names(pair)
+        
+        with torch.no_grad():
+            distance = self.siamese_model(x1, x2)
+            sim = 1 - distance[0].item()  # Convert distance to similarity
         return sim
+
+    def process_name(self, name):
+        """Preprocess a name for feature calculation"""
+        if not name:
+            return ''
+        # Convert to lowercase and remove special characters
+        processed_name = name.lower().strip()
+        # Remove any characters that aren't letters or whitespace
+        processed_name = re.sub(r'[^a-z\s]', '', processed_name)
+        # Split into tokens and join with space
+        return ' '.join(processed_name.split())
+
+    def get_base_features(self, name_a, name_b):
+        """Calculate base features for a name pair"""
+        # Process names
+        name_a = self.process_name(name_a)
+        name_b = self.process_name(name_b)
+        
+        features = np.zeros(len(self.feature_names))
+        
+        # Calculate basic features
+        features[0] = fuzz.partial_ratio(name_a, name_b)  # partial_ratio
+        features[1] = fuzz.token_sort_ratio(name_a, name_b)  # token_sort
+        features[2] = fuzz.token_set_ratio(name_a, name_b)  # tkn_set
+        
+        # IPA similarity
+        ipa_a = self.pe.encode(name_a)
+        ipa_b = self.pe.encode(name_b)
+        features[3] = 1.0 - (editdistance.eval(ipa_a, ipa_b) / max(len(ipa_a), len(ipa_b)))  # ipa_sim
+        
+        # Soundex match
+        features[4] = 1.0 if self.pshp_soundex_first.encode(name_a) == self.pshp_soundex_first.encode(name_b) else 0.0
+        
+        # Calculate remaining algorithm features
+        for i, algo in enumerate(self.algos):
+            try:
+                features[i + 5] = algo.sim(name_a, name_b)
+            except:
+                features[i + 5] = 0.0
+        
+        return features
 
     def base_model_inf(self, x):
         # get the positive class prediction from model
         y_pred = self.baseModel.predict_proba(x.reshape(1, -1))[0, 1]
         return y_pred
 
-    def meta_inf(self, pair, base_features):
-        meta_features = np.zeros(5)
-        meta_features[0] = self.base_model_inf(base_features)
-        meta_features[1] = self.siamese_inf(pair)
-        # add base features to meta_features ('tkn_set', 'iterativesubstring', 'strcmp95')
+    def meta_inf(self, name_a, name_b):
+        """Get meta model prediction for a single pair"""
+        # Get base features
+        base_features = self.get_base_features(name_a, name_b)
+        
+        # Get predictions from base and siamese models
+        base_pred = self.base_model_inf(base_features)
+        siamese_pred = self.siamese_inf((name_a, name_b))
+        
+        # Create meta features
+        meta_features = np.zeros(6)  # Changed from 5 to 6 features
+        meta_features[0] = base_pred
+        meta_features[1] = siamese_pred
         meta_features[2] = base_features[2]  # tkn_set
         meta_features[3] = base_features[5]  # iterativesubstring
         meta_features[4] = base_features[11]  # strcmp95
-
-        sim = self.metaModel.predict_proba(meta_features.reshape(1, -1))[0, 1]
-        return sim
+        meta_features[5] = base_pred * siamese_pred  # interaction term
+        
+        # Get meta model prediction
+        return self.metaModel.predict_proba(meta_features.reshape(1, -1))[0, 1]
 
     def seen_set(self, item, mapping):
         h = hash(item)
@@ -445,3 +496,39 @@ class Matcher:
             score = self.similarity(name, choice, surname_first=surname_first)
             if exact > score >= score_cutoff:
                 yield choice, score
+    def get_predictions_batch(self, names_a, names_b):
+        """Get predictions for a batch of name pairs"""
+        num_pairs = len(names_a)
+        base_preds = []
+        siamese_preds = []
+        
+        # Process in batches
+        for i in range(0, num_pairs, self.batch_size):
+            batch_end = min(i + self.batch_size, num_pairs)
+            batch_names_a = names_a[i:batch_end]
+            batch_names_b = names_b[i:batch_end]
+            
+            # Get base features for batch
+            batch_features = np.array([
+                self.get_base_features(name_a, name_b) 
+                for name_a, name_b in zip(batch_names_a, batch_names_b)
+            ])
+            
+            # Get base model predictions
+            batch_base_preds = self.baseModel.predict_proba(batch_features)[:, 1]
+            base_preds.extend(batch_base_preds)
+            
+            # Transform names for Siamese model
+            x1_batch = np.asarray(list(self.vocab.transform(np.asarray(batch_names_a))))
+            x2_batch = np.asarray(list(self.vocab.transform(np.asarray(batch_names_b))))
+            x1_batch = torch.from_numpy(x1_batch).to(self.device)
+            x2_batch = torch.from_numpy(x2_batch).to(self.device)
+            
+            # Get Siamese predictions
+            with torch.no_grad():
+                distances = self.siamese_model(x1_batch, x2_batch)
+                similarities = 1 - distances.cpu().numpy()
+            siamese_preds.extend(similarities)
+        
+        return np.array(base_preds), np.array(siamese_preds)
+

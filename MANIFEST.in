@@ -1,1 +1,6 @@
-include hmni/models/*
+include LICENSE
+include README.md
+include requirements.txt
+recursive-include hmni/models *.tar.gz
+recursive-include hmni/models *.pkl
+recursive-include hmni/models *.pt 

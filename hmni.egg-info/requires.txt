@@ -1,0 +1,8 @@
+numpy
+pandas
+torch
+joblib
+unidecode
+fuzzywuzzy
+editdistance
+abydos@ git+https://github.com/IlnarSelimcan/abydos
