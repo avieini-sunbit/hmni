@@ -20,6 +20,7 @@ setup(
         "fuzzywuzzy",
         "editdistance",
         "abydos @ git+https://github.com/IlnarSelimcan/abydos"
+        "scikit-learn"
     ],
     python_requires=">=3.9",
     classifiers=[
