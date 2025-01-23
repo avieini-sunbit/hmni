@@ -16,18 +16,15 @@ from random import randint
 import editdistance
 
 import warnings
+
 warnings.filterwarnings("ignore", category=UserWarning)
 
-
 from fuzzywuzzy import fuzz
-
-
-
 
 from collections import Counter
 from hmni import syllable_tokenizer
 from hmni import input_helpers_torch as input_helpers
-from hmni import preprocess_torch as preprocess    
+from hmni import preprocess_torch as preprocess
 from hmni.siamese_network_torch import SiameseLSTM
 import tarfile
 
@@ -99,24 +96,24 @@ class Matcher:
             'soundex_match', 'iterativesubstring', 'bisim',
             'discountedlevenshtein', 'prefix', 'lcsstr', 'mlipns',
             'strcmp95', 'mra', 'editex', 'saps', 'flexmetric',
-            'jaro', 'higueramico', 'sift4', 'eudex','aline', 'covington',
+            'jaro', 'higueramico', 'sift4', 'eudex', 'aline', 'covington',
             'phoneticeditdistance'
         ]
-        
+
         # String Distance algorithms
         self.algos = [IterativeSubString(), BISIM(), DiscountedLevenshtein(), Prefix(), LCSstr(), MLIPNS(),
                       Strcmp95(), MRA(), Editex(), SAPS(), FlexMetric(), JaroWinkler(mode='Jaro'), HigueraMico(),
-                      Sift4(), Eudex(),ALINE(), CovingtonGuard(), PhoneticEditDistance()]
-        
+                      Sift4(), Eudex(), ALINE(), CovingtonGuard(), PhoneticEditDistance()]
+
         # Load models
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        
+
         # Base model (Random Forest)
         self.baseModel = joblib.load(os.path.join(model_dir, 'base_model.pkl'))
-        
+
         # Load vocabulary
         self.vocab = preprocess.VocabularyProcessor.load(os.path.join(model_dir, 'vocab_siamese.pkl'))
-        
+
         # Initialize and load Siamese model
         self.siamese_model = SiameseLSTM(
             vocab_size=len(self.vocab.vocabulary_),
@@ -125,18 +122,18 @@ class Matcher:
             n_layers=2,
             dropout=0.2
         ).to(self.device)
-        
+
         # Load model with new checkpoint format
-        checkpoint = torch.load(os.path.join(model_dir, 'siamese_model_final.pt'), map_location=self.device,weights_only=True)
+        checkpoint = torch.load(os.path.join(model_dir, 'siamese_model_final.pt'), map_location=self.device,
+                                weights_only=True)
         self.siamese_model.load_state_dict(checkpoint['model_state_dict'])
         self.siamese_model.eval()
-        
+
         # Meta model
         self.metaModel = joblib.load(os.path.join(model_dir, 'meta.pkl'))
-        
+
         # Batch size for predictions
         self.batch_size = 64 if self.device.type == 'cpu' else 512
-
 
         # seen names (mapping dict from raw name to processed name)
         self.seen_names = {}
@@ -156,7 +153,7 @@ class Matcher:
 
     def output_sim(self, sim, prob, threshold):
         if prob:
-            return round(sim,4)
+            return round(sim, 4)
         return 1 if sim >= threshold else 0
 
     def assign_similarity(self, name_a, name_b, score):
@@ -269,7 +266,7 @@ class Matcher:
         # generate features for base-level model
         # features = self.featurize(pair)
         # make inference on meta model
-        sim = self.meta_inf(pair[0],pair[1])
+        sim = self.meta_inf(pair[0], pair[1])
 
         if not missing_component:
             # add pair score to the seen dictionary
@@ -404,7 +401,7 @@ class Matcher:
 
     def siamese_inf(self, pair):
         x1, x2 = self.transform_names(pair)
-        
+
         with torch.no_grad():
             distance = self.siamese_model(x1, x2)
             sim = 1 - distance[0].item()  # Convert distance to similarity
@@ -426,29 +423,29 @@ class Matcher:
         # Process names
         name_a = self.process_name(name_a)
         name_b = self.process_name(name_b)
-        
+
         features = np.zeros(len(self.feature_names))
-        
+
         # Calculate basic features
         features[0] = fuzz.partial_ratio(name_a, name_b)  # partial_ratio
         features[1] = fuzz.token_sort_ratio(name_a, name_b)  # token_sort
         features[2] = fuzz.token_set_ratio(name_a, name_b)  # tkn_set
-        
+
         # IPA similarity
         ipa_a = self.pe.encode(name_a)
         ipa_b = self.pe.encode(name_b)
         features[3] = 1.0 - (editdistance.eval(ipa_a, ipa_b) / max(len(ipa_a), len(ipa_b)))  # ipa_sim
-        
+
         # Soundex match
         features[4] = 1.0 if self.pshp_soundex_first.encode(name_a) == self.pshp_soundex_first.encode(name_b) else 0.0
-        
+
         # Calculate remaining algorithm features
         for i, algo in enumerate(self.algos):
             try:
                 features[i + 5] = algo.sim(name_a, name_b)
             except:
                 features[i + 5] = 0.0
-        
+
         return features
 
     def base_model_inf(self, x):
@@ -460,11 +457,11 @@ class Matcher:
         """Get meta model prediction for a single pair"""
         # Get base features
         base_features = self.get_base_features(name_a, name_b)
-        
+
         # Get predictions from base and siamese models
         base_pred = self.base_model_inf(base_features)
         siamese_pred = self.siamese_inf((name_a, name_b))
-        
+
         # Create meta features
         meta_features = np.zeros(6)  # Changed from 5 to 6 features
         meta_features[0] = base_pred
@@ -473,7 +470,7 @@ class Matcher:
         meta_features[3] = base_features[5]  # iterativesubstring
         meta_features[4] = base_features[11]  # strcmp95
         meta_features[5] = base_pred * siamese_pred  # interaction term
-        
+
         # Get meta model prediction
         return self.metaModel.predict_proba(meta_features.reshape(1, -1))[0, 1]
 
@@ -497,39 +494,71 @@ class Matcher:
             score = self.similarity(name, choice, surname_first=surname_first)
             if exact > score >= score_cutoff:
                 yield choice, score
+
     def get_predictions_batch(self, names_a, names_b):
         """Get predictions for a batch of name pairs"""
         num_pairs = len(names_a)
         base_preds = []
         siamese_preds = []
-        
+
         # Process in batches
         for i in range(0, num_pairs, self.batch_size):
             batch_end = min(i + self.batch_size, num_pairs)
             batch_names_a = names_a[i:batch_end]
             batch_names_b = names_b[i:batch_end]
-            
+
             # Get base features for batch
             batch_features = np.array([
-                self.get_base_features(name_a, name_b) 
+                self.get_base_features(name_a, name_b)
                 for name_a, name_b in zip(batch_names_a, batch_names_b)
             ])
-            
+
             # Get base model predictions
             batch_base_preds = self.baseModel.predict_proba(batch_features)[:, 1]
             base_preds.extend(batch_base_preds)
-            
+
             # Transform names for Siamese model
             x1_batch = np.asarray(list(self.vocab.transform(np.asarray(batch_names_a))))
             x2_batch = np.asarray(list(self.vocab.transform(np.asarray(batch_names_b))))
             x1_batch = torch.from_numpy(x1_batch).to(self.device)
             x2_batch = torch.from_numpy(x2_batch).to(self.device)
-            
+
             # Get Siamese predictions
             with torch.no_grad():
                 distances = self.siamese_model(x1_batch, x2_batch)
                 similarities = 1 - distances.cpu().numpy()
             siamese_preds.extend(similarities)
-        
+
         return np.array(base_preds), np.array(siamese_preds)
+
+    def _process_batch(self, batch_data):
+        """Helper function to process a batch of names in parallel"""
+        name_a, name_b, threshold, surname_first = batch_data
+        return self.similarity(name_a, name_b, prob=True, threshold=threshold, surname_first=surname_first)
+
+    def similarity_batch(self, names_a, names_b, prob=True, threshold=0.5, surname_first=False, n_jobs=-1):
+        """Calculate similarity between two lists of names in parallel batches"""
+        if not (isinstance(names_a, (list, np.ndarray)) and isinstance(names_b, (list, np.ndarray))):
+            raise TypeError('Input must be lists or numpy arrays')
+        if len(names_a) != len(names_b):
+            raise ValueError('Length of input lists must match')
+        if len(names_a) == 0:
+            return []
+
+        import multiprocessing as mp
+        if n_jobs == -1:
+            n_jobs = mp.cpu_count()
+
+        # Prepare batches for parallel processing
+        batch_data = [(name_a, name_b, threshold, surname_first)
+                      for name_a, name_b in zip(names_a, names_b)]
+
+        # Process in parallel
+        with mp.Pool(processes=n_jobs) as pool:
+            results = pool.map(self._process_batch, batch_data)
+
+        if not prob:
+            results = [1 if x >= threshold else 0 for x in results]
+
+        return [round(x, 4) for x in results]
 
